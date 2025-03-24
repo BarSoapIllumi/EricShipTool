@@ -1,0 +1,116 @@
+#!/bin/bash
+set -e
+
+# Load necessary module
+eval `/app/modules/0/bin/modulecmd bash add sshpass`
+module add python/3.7
+
+# Function to display usage information
+usage() {
+    echo "Usage: $0 (-i <ipaddress> | -p <podname>) [-a] [-o <outputdir>]"
+    echo " -i <ipaddress> Use an IP address for operations"
+    echo " -p <podname>   Use a Kubernetes pod name for operations"
+    echo " -a             Open the result in Aether"
+    echo " -o <outputdir> Specify an output directory to copy the JSON file"
+    echo " -r <resultdir> Specify an output directory to save the result file"
+    echo " -t <timestamp> Filter events at/after specified times in format (HH:MM:SS)"
+    exit 1
+}
+
+# Function to clean up temporary files
+cleanup() {
+    if [ -d "$TEMP_DIR" ]; then
+        echo "Cleaning up temporary files..."
+        rm -rf "$TEMP_DIR"
+    fi
+}
+
+# Trap to ensure cleanup is called on EXIT
+trap cleanup EXIT
+
+# Initialize variables
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PASSWORD="root"
+TEMP_DIR=$(mktemp -d)
+JSON_FILE="$TEMP_DIR/output.json"
+AETHER=false
+IP_ADDRESS=""
+POD_NAME=""
+OUTPUT_DIR=""
+TIMESTAMP=""
+RESULT_FILE=""
+
+# Parse command-line options
+while getopts ":i:p:ao:r:t:" opt; do
+    case $opt in
+        i) IP_ADDRESS="$OPTARG"
+        ;;
+        p) POD_NAME="$OPTARG"
+        ;;
+        a) AETHER=true
+        ;;
+        o) OUTPUT_DIR="$OPTARG"
+        ;;
+        t) TIMESTAMP="$OPTARG"
+        ;;
+        r) RESULT_FILE="$OPTARG"
+        ;;
+        \?) echo "Invalid option -$OPTARG" >&2 # >& ends the command 
+            usage
+        ;;
+        :) echo "Option -$OPTARG requires an argument." >&2
+            usage
+        ;;
+    esac
+done
+
+# Check for mutual exclusivity of -i and -p
+if [ -n "$IP_ADDRESS" ] && [ -n "$POD_NAME" ]; then # -n "string": if a string has non-zero length, this is true
+    echo "Options -i and -p are mutually exclusive."
+    usage
+elif [ -z "$IP_ADDRESS" ] && [ -z "$POD_NAME" ]; then # -z "string": if a string has zero length, this is true
+    usage
+fi
+
+if [ -n "$IP_ADDRESS" ]; then
+    REMOTE_PATH="root@$IP_ADDRESS:/tmp/applicationtmp/*/*.ship.whip"
+    sshpass -p "$PASSWORD" scp $REMOTE_PATH "$TEMP_DIR"
+    sshpass -p "$PASSWORD" ssh root@${IP_ADDRESS} "um list" > "$TEMP_DIR/mailboxes.txt"
+elif [ -n "$POD_NAME" ]; then
+ FILES=$(oc exec $POD_NAME -- find /tmp -name "*.whip")
+    for FILE in $FILES; do
+        echo "copying file $FILE"
+        file_name=$(basename $FILE)
+        oc cp ${POD_NAME}:${FILE} $TEMP_DIR/$file_name
+        echo "done!"
+    done
+    echo "copy mailboxes"
+    oc exec $POD_NAME -- um list > $TEMP_DIR/mailboxes.txt
+fi
+
+if $AETHER; then
+    if [ ! -e ${HOME}/.shipitrc ]; then
+       ${DIR}/shipit --login
+    fi
+    ${DIR}/shipit $TEMP_DIR/*.whip -m $TEMP_DIR/mailboxes.txt --aether
+fi
+
+# Expand DIR (go to directory and then open shipit)
+# TEMP_DIR is a command (see var init): makes temporary files
+# Redirects stdout into the provided json file
+${DIR}/shipit $TEMP_DIR/*.whip -m $TEMP_DIR/mailboxes.txt > $JSON_FILE
+
+# if [ -n "$RESULT_FILE" ]; then
+    
+# fi
+
+
+
+# Copy JSON file to the specified output directory if provided
+if [ -n "$OUTPUT_DIR" ]; then
+    cp $JSON_FILE "$OUTPUT_DIR"
+    echo "JSON file copied to $OUTPUT_DIR"
+fi
+
+
+# Cleanup will be handled by the trap on EXIT
